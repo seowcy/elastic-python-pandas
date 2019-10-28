@@ -6,6 +6,7 @@ import json
 # Set ELASTIC_HOST to be the IP address of the elasticsearch coordinator node
 ELASTIC_HOST = "127.0.0.1"
 es = Elasticsearch(ELASTIC_HOST)
+TIMEOUT = 600
 
 
 def elastic_get_indices(all=False):
@@ -34,13 +35,14 @@ Args:
     
     """
     body = {
+        "track_total_hits": True,
         "query": {
             "match": {
                 column: query
             }
         }
     }
-    response = es.search(index=index,body=body,request_timeout=120)
+    response = es.search(index=index,body=body,request_timeout=TIMEOUT)
     total_hits = response["hits"]["total"]["value"]
     if size == None:
         size = total_hits
@@ -53,8 +55,10 @@ Args:
                     }
                 }
         }
-        response = es.search(index=index,body=body,request_timeout=120)
-        return pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT)
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(size)]
+        return df
     if total_hits <= 10000:
         body = {
             "size": total_hits,
@@ -64,8 +68,10 @@ Args:
                     }
                 }
         }
-        response = es.search(index=index,body=body,request_timeout=120)
-        return pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(total_hits)])
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT)
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(size)]
+        return df
     result = []
     body = {
         "size": 10000,
@@ -75,17 +81,108 @@ Args:
                 }
             }
    }
-    response = es.search(index=index,body=body,scroll="10s",request_timeout=120)
+    response = es.search(index=index,body=body,scroll="10s",request_timeout=TIMEOUT)
     response_hits = len(response["hits"]["hits"])
-    result.append(pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)]))
+    df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)])
+    df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(response_hits)]
+    result.append(df)
     scroll_id = response["_scroll_id"]
     for i in range(10000,size,10000):
         response = es.scroll(scroll_id=scroll_id,scroll="10s")
         response_hits = len(response["hits"]["hits"])
-        result.append(pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)]))
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(response_hits)]
+        result.append(df)
     result = pd.concat(result,axis=0,ignore_index=True)
-    result["@timestamp"] = pd.to_datetime(result["@timestamp"])
-    return result.sort_values("@timestamp", ascending=False).reset_index(drop=True)
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
+    return result.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+def elastic_multi_query(index,query,bool_type="OR",size=None):
+    """
+Returns a pandas DataFrame of specified size from the specified index with a search query.
+Query should be a dictionary of conditions to match.
+
+Args:
+    index: name of index in elasticsearch cluster
+    query: list of dict of query strings to be searched for in the specified columns (e.g. [{"_id": "abc"}, {"name": "John"}])
+    bool_type: specifies whether the query conditions use AND or OR (default: "OR")
+    size: size of response, returns all responses if None (default: None)
+    
+    """
+    bool_mapping = {"OR": "should", "AND": "must"}
+    body = {
+        "track_total_hits": True,
+        "query": {
+            "bool": {
+                bool_mapping[bool_type]: [
+                    {"match": i} for i in query 
+                ]
+            }
+        }
+    }
+    response = es.search(index=index,body=body,request_timeout=TIMEOUT)
+    total_hits = response["hits"]["total"]["value"]
+    if size == None:
+        size = total_hits
+    if size <= 10000:
+        body = {
+            "track_total_hits": True,
+            "size": size,
+            "query": {
+                "bool": {
+                    bool_mapping[bool_type]: [
+                        {"match": i} for i in query 
+                    ]
+                }
+            }
+        }
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT)
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(size)]
+        return df
+    if total_hits <= 10000:
+        body = {
+            "track_total_hits": True,
+            "size": total_hits,
+            "query": {
+                "bool": {
+                    bool_mapping[bool_type]: [
+                        {"match": i} for i in query 
+                    ]
+                }
+            }
+        }
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT)
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(size)]
+        return df
+    result = []
+    body = {
+        "track_total_hits": True,
+        "size": 10000,
+        "query": {
+            "bool": {
+                bool_mapping[bool_type]: [
+                    {"match": i} for i in query 
+                ]
+            }
+        }
+    }
+    response = es.search(index=index,body=body,scroll="10s",request_timeout=TIMEOUT)
+    response_hits = len(response["hits"]["hits"])
+    df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)])
+    df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(response_hits)]
+    result.append(df)
+    scroll_id = response["_scroll_id"]
+    for i in range(10000,size,10000):
+        response = es.scroll(scroll_id=scroll_id,scroll="10s")
+        response_hits = len(response["hits"]["hits"])
+        df = pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)])
+        df["_id"] = [response["hits"]["hits"][i]["_id"] for i in range(response_hits)]
+        result.append(df)
+    result = pd.concat(result,axis=0,ignore_index=True)
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
+    return result.sort_values("timestamp", ascending=False).reset_index(drop=True)
 
 def elastic_query_range(index,column,start_range,end_range=None,size=None,fields=None):
     """
@@ -122,9 +219,9 @@ Args:
         }
     }
     if fields == None:
-        response = es.search(index=index,body=body,request_timeout=120)
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT)
     else:
-        response = es.search(index=index,body=body,request_timeout=120,_source=fields)
+        response = es.search(index=index,body=body,request_timeout=TIMEOUT,_source=fields)
     total_hits = response["hits"]["total"]["value"]
     if size == None:
         size = total_hits
@@ -141,9 +238,9 @@ Args:
             }
         }
         if fields == None:
-            response = es.search(index=index,body=body,request_timeout=120)
+            response = es.search(index=index,body=body,request_timeout=TIMEOUT)
         else:
-            response = es.search(index=index,body=body,request_timeout=120,_source=fields)
+            response = es.search(index=index,body=body,request_timeout=TIMEOUT,_source=fields)
         return pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(size)])
     if total_hits <= 10000:
         body = {
@@ -158,9 +255,9 @@ Args:
             }
         }
         if fields == None:
-            response = es.search(index=index,body=body,request_timeout=120)
+            response = es.search(index=index,body=body,request_timeout=TIMEOUT)
         else:
-            response = es.search(index=index,body=body,request_timeout=120,_source=fields)
+            response = es.search(index=index,body=body,request_timeout=TIMEOUT,_source=fields)
         return pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(total_hits)])
     result = []
     body = {
@@ -175,9 +272,9 @@ Args:
         }
     }
     if fields == None:
-        response = es.search(index=index,body=body,scroll="10s",request_timeout=120)
+        response = es.search(index=index,body=body,scroll="10s",request_timeout=TIMEOUT)
     else:
-        response = es.search(index=index,body=body,scroll="10s",request_timeout=120,_source=fields)
+        response = es.search(index=index,body=body,scroll="10s",request_timeout=TIMEOUT,_source=fields)
     response_hits = len(response["hits"]["hits"])
     result.append(pd.DataFrame([response["hits"]["hits"][i]["_source"] for i in range(response_hits)]))
     scroll_id = response["_scroll_id"]
@@ -252,5 +349,5 @@ Args:
         aggs_type: aggs_params
     }
     
-    response = es.search(index=index,body=body,request_timeout=120)
+    response = es.search(index=index,body=body,request_timeout=TIMEOUT)
     return response["aggregations"]["my_aggs"]
